@@ -59,7 +59,8 @@ describe('API3 UPDATE', function() {
   });
 
 
-  after(() => {
+  after(async () => {
+    await utils.storageClear(self.instance.ctx);
     self.instance.ctx.bus.teardown();
   });
 
@@ -69,7 +70,7 @@ describe('API3 UPDATE', function() {
   });
 
 
-  afterEach(() => {
+  afterEach(async () => {
     self.cache.shouldBeEmpty();
   });
 
@@ -109,7 +110,7 @@ describe('API3 UPDATE', function() {
 
     res.body.status.should.equal(201);
     res.body.identifier.should.equal(self.validDoc.identifier);
-    self.cache.nextShouldEql(self.col, self.validDoc)
+    await self.cache.nextShouldEql(self.col, self.validDoc)
 
     const lastModified = new Date(res.headers['last-modified']).getTime(); // Last-Modified has trimmed milliseconds
 
@@ -133,7 +134,7 @@ describe('API3 UPDATE', function() {
       .expect(200);
 
     res.body.status.should.equal(200);
-    self.cache.nextShouldEql(self.col, self.validDoc)
+    await self.cache.nextShouldEql(self.col, self.validDoc)
 
     const lastModified = new Date(res.headers['last-modified']).getTime(); // Last-Modified has trimmed milliseconds
 
@@ -152,13 +153,19 @@ describe('API3 UPDATE', function() {
     const doc = Object.assign({}, self.validDoc, {
       carbs: 11
     });
+    // srvModified comes from a monotonic server clock that a large batch in an
+    // earlier file (api3.v1-writes-history) can push seconds ahead of
+    // Date.now(), so a header based on now alone can fall before it. Use
+    // whichever is later, rounded up past the header's whole second.
+    const stored = await self.get(self.validDoc.identifier, self.jwt.read);
+    const since = Math.max(Date.now(), stored.srvModified);
     let res = await self.instance.put(self.urlIdent, self.jwt.update)
-      .set('If-Unmodified-Since', new Date(new Date().getTime() + 1000).toUTCString())
+      .set('If-Unmodified-Since', new Date(Math.ceil(since / 1000) * 1000 + 1000).toUTCString())
       .send(doc)
       .expect(200);
 
     res.body.status.should.equal(200);
-    self.cache.nextShouldEql(self.col, doc)
+    await self.cache.nextShouldEql(self.col, doc)
 
     let body = await self.get(self.validDoc.identifier, self.jwt.read);
     body.should.containEql(doc);
@@ -293,7 +300,48 @@ describe('API3 UPDATE', function() {
 
     res.body.status.should.equal(200);
     delete self.validDoc.srvModified;
-    self.cache.nextShouldEql(self.col, self.validDoc)
+    await self.cache.nextShouldEql(self.col, self.validDoc)
+  });
+
+
+  it('should normalize endmills when replacing durationInMilliseconds', async () => {
+    const tempBasalDoc = {
+      identifier: utils.randomString('32', 'aA#'),
+      date: (new Date()).getTime() + 1,
+      utcOffset: -180,
+      app: testConst.TEST_APP,
+      device: testConst.TEST_DEVICE + ' API3 UPDATE duration',
+      eventType: 'Temp Basal',
+      absolute: 1.2,
+      duration: 30
+    };
+
+    let res = await self.instance.put(`${self.url}/${tempBasalDoc.identifier}`, self.jwt.all)
+      .send(tempBasalDoc)
+      .expect(201);
+
+    res.body.status.should.equal(201);
+    await self.cache.nextShouldEql(self.col, tempBasalDoc)
+
+    const replacedDoc = Object.assign({}, tempBasalDoc, {
+      absolute: 0.7,
+      duration: 0,
+      durationInMilliseconds: 26584
+    });
+
+    res = await self.instance.put(`${self.url}/${tempBasalDoc.identifier}`, self.jwt.update)
+      .send(replacedDoc)
+      .expect(200);
+
+    res.body.status.should.equal(200);
+    await self.cache.nextShouldEql(self.col, replacedDoc)
+
+    const body = await self.get(tempBasalDoc.identifier);
+    body.absolute.should.equal(0.7);
+    body.duration.should.equal(0);
+    body.durationInMilliseconds.should.equal(26584);
+    body.endmills.should.equal(tempBasalDoc.date + 26584);
+    body.subject.should.equal(self.subject.apiUpdate.name);
   });
 
 
@@ -302,7 +350,7 @@ describe('API3 UPDATE', function() {
       .expect(200);
 
     res.body.status.should.equal(200);
-    self.cache.nextShouldDeleteLast(self.col)
+    await self.cache.nextShouldDeleteLast(self.col)
 
     res = await self.instance.put(self.urlIdent, self.jwt.update)
       .send(self.validDoc)
@@ -312,4 +360,3 @@ describe('API3 UPDATE', function() {
   });
 
 });
-
